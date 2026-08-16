@@ -1,0 +1,107 @@
+rules_version = '2';
+
+// ============================================================================
+// CIE Registrar — Firestore security rules
+//
+// Data model:
+//   courses/{courseId}   — course details + CIE-1/2/3 component design,
+//                           editable only by that course's lead (or an admin)
+//   sections/{sectionId} — one doc per course-section-faculty assignment,
+//                           with a status field per CIE stage
+//   admins/{email}       — existence of a doc here (any content) grants the
+//                           admin role to that email address
+//
+// Enforced here (this is the real security boundary — the client-side
+// domain check in src/lib/auth.js is only a UX convenience):
+//   - Only @rvu.edu.in accounts (or whatever ALLOWED_EMAIL_DOMAIN is set to
+//     below) may read or write anything.
+//   - A course's component design (cie1/cie2/cie3/qpKeyStatus) can only be
+//     edited by that course's recorded lead, or an admin.
+//   - A section's status can be set to "submitted" by the assigned faculty
+//     member (pending -> submitted only), and to "verified" / reverted by
+//     that course's lead, or an admin.
+//
+// IMPORTANT: change ALLOWED_DOMAIN below if your institution's domain is
+// not rvu.edu.in, and test changes in the Firebase console's Rules
+// Playground before relying on them in production — these were authored
+// carefully but could not be run against a live emulator in the
+// environment that produced them.
+// ============================================================================
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function email() {
+      return request.auth.token.email.lower();
+    }
+
+    function isSignedIn() {
+      return request.auth != null && request.auth.token.email != null;
+    }
+
+    function isRvuAccount() {
+      return isSignedIn() && email().matches('.*@rvu[.]edu[.]in$');
+    }
+
+    function isAdmin() {
+      return isSignedIn() && exists(/databases/$(database)/documents/admins/$(email()));
+    }
+
+    function isAuthorised() {
+      return isRvuAccount() || isAdmin();
+    }
+
+    // ---------------- admins ----------------
+    match /admins/{adminEmail} {
+      allow read: if isAuthorised();
+      allow write: if isAdmin();
+    }
+
+    // ---------------- courses ----------------
+    match /courses/{courseId} {
+      allow read: if isAuthorised();
+
+      // Only an admin may create/delete course documents (seeding is done
+      // with the Admin SDK, which bypasses these rules entirely anyway).
+      allow create, delete: if isAdmin();
+
+      // A course's own lead may update it; only these fields are meant to
+      // change day-to-day (component design + QP/key submission status).
+      allow update: if isAdmin() || (
+        isRvuAccount() &&
+        resource.data.leadEmail == email() &&
+        request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['cie1', 'cie2', 'cie3', 'qpKeyStatus', 'updatedAt', 'updatedBy'])
+      );
+    }
+
+    // ---------------- sections ----------------
+    match /sections/{sectionId} {
+      allow read: if isAuthorised();
+      allow create, delete: if isAdmin();
+
+      function course() {
+        return get(/databases/$(database)/documents/courses/$(resource.data.courseId)).data;
+      }
+
+      function isMySection() {
+        return isRvuAccount() && resource.data.facultyEmail == email();
+      }
+
+      function isMyLeadCourse() {
+        return isRvuAccount() && course().leadEmail == email();
+      }
+
+      function onlyStatusFieldsChanged() {
+        return request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['cie1Status', 'cie2Status', 'cie3Status',
+                    'cie1UpdatedAt', 'cie2UpdatedAt', 'cie3UpdatedAt',
+                    'cie1UpdatedBy', 'cie2UpdatedBy', 'cie3UpdatedBy']);
+      }
+
+      allow update: if isAdmin() || (
+        onlyStatusFieldsChanged() && (isMySection() || isMyLeadCourse())
+      );
+    }
+  }
+}
