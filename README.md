@@ -165,3 +165,4 @@ firestore.rules           Security rules (see step 2 above)
 - **Component design (CIE-1/2/3 evaluation methods)** starts empty for
   every course — course leads need to fill these in; until then the
   Analysis page and the mark-cap checks have nothing to show.
+# cie-registrar
